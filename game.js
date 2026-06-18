@@ -48,9 +48,10 @@ const state = {
   scene:'menu', mode:'zen', theme:null, t:0,
   worldR: 380,
   hole:{ x:0, z:0, r:7, vx:0, vz:0 },
-  cubes:[],            // {x,y,z,size,col,rest:{x,y,z}, dead, falling, vx,vy,vz, struct}
-  structs:[],          // {cx,cz,footR,tier,alive,cubeIdx:[]}
-  falling:[],          // indices currently animating
+  cubes:[],            // {x,y,z,size,col, gy, landY, state(0 rest/1 fall/2 landed), vy, struct}
+  structs:[],          // {cx,cz,groundR,boundR,tier,alive,released,cubeIdx:[]}
+  falling:[],          // indices currently falling under gravity
+  landed:[],           // indices resting on the ground as debris (re-eaten if hole reaches them)
   cam:{ dist:60, height:90 },
   // floating joystick: anchor = where the finger first landed; cur = current finger pos
   input:{ active:false, ax:0, ay:0, cx:0, cy:0 },
@@ -146,7 +147,16 @@ function makeStruct(tier, theme){
     const w=Math.floor(rand(3,5)), h=Math.floor(rand(11,16)), d=Math.floor(rand(3,5));
     cubes=vbox(w,h,d,true,pick()); footW=w; footD=d;
   }
-  return { cubes, footR: Math.max(footW,footD)/2 * TIER[tier].cube };
+  // groundR = horizontal reach of the cubes that actually touch the ground (y===0). This is what
+  // blocks the hole — a thin trunk barely blocks, a wide building base blocks a lot. boundR is the
+  // full extent, used only for culling/spacing.
+  const cs=TIER[tier].cube;
+  let gr=0, br=0;
+  for(const c of cubes){
+    const horiz=Math.hypot(c.x,c.z); if(horiz>br) br=horiz;
+    if(c.y===0){ const m=Math.max(Math.abs(c.x),Math.abs(c.z)); if(m>gr) gr=m; }
+  }
+  return { cubes, groundR:(gr+0.5)*cs, boundR:(br+0.6)*cs };
 }
 
 // ---------- LEVEL BUILD ----------
@@ -155,7 +165,7 @@ function buildLevel(theme){
   state.worldR = 300 + Math.random()*100;
   state.hole={ x:0, z:0, r:7, vx:0, vz:0 };
   state.holeReserve = Math.PI*7*7;   // banked area the radius eases toward
-  state.cubes=[]; state.structs=[]; state.falling=[];
+  state.cubes=[]; state.structs=[]; state.falling=[]; state.landed=[];
   state.score=0; state.eaten=0;
   state.timeLeft = state.mode==='timed' ? 120 : Infinity;
 
@@ -173,25 +183,25 @@ function buildLevel(theme){
     // find a spot
     let cx,cz,ok=false;
     for(let a=0;a<14;a++){
-      const ang=rand(0,Math.PI*2), rad=Math.sqrt(Math.random())*(state.worldR-20-st.footR);
+      const ang=rand(0,Math.PI*2), rad=Math.sqrt(Math.random())*(state.worldR-20-st.boundR);
       cx=Math.cos(ang)*rad; cz=Math.sin(ang)*rad;
-      if(Math.hypot(cx,cz) < 26+st.footR) continue;        // keep spawn area clear
+      if(Math.hypot(cx,cz) < 26+st.boundR) continue;        // keep spawn area clear
       ok=true;
-      for(const p of placed){ if(Math.hypot(cx-p.cx,cz-p.cz) < (st.footR+p.footR)*0.6){ok=false;break;} }
+      for(const p of placed){ if(Math.hypot(cx-p.cx,cz-p.cz) < (st.boundR+p.boundR)*0.6){ok=false;break;} }
       if(ok) break;
     }
     if(!ok) continue;
     const cs=TIER[tier].cube;
-    const struct={ cx, cz, footR:st.footR, tier, alive:st.cubes.length, cubeIdx:[] };
+    const struct={ cx, cz, groundR:st.groundR, boundR:st.boundR, tier, alive:st.cubes.length, released:false, cubeIdx:[] };
     for(const c of st.cubes){
       const wx=cx + c.x*cs, wy=(c.y+0.5)*cs, wz=cz + c.z*cs;
       const idx=state.cubes.length;
-      state.cubes.push({ x:wx,y:wy,z:wz, size:cs, col:c.col, rest:{x:wx,y:wy,z:wz},
-        dead:false, falling:false, vx:0,vy:0,vz:0, rx:rand(-1,1),ry:rand(-1,1),rz:rand(-1,1), struct });
+      state.cubes.push({ x:wx,y:wy,z:wz, size:cs, col:c.col, gy:c.y, landY:cs*0.5,
+        state:0, vy:0, rx:rand(-1,1),ry:rand(-1,1),rz:rand(-1,1), struct });
       struct.cubeIdx.push(idx);
     }
     state.structs.push(struct);
-    placed.push({cx,cz,footR:st.footR});
+    placed.push({cx,cz,boundR:st.boundR});
   }
 
   buildCubeMesh();
@@ -288,55 +298,62 @@ function update(dt){
   const targetR = Math.min(Math.sqrt(state.holeReserve/Math.PI), capR);
   if(Math.abs(targetR - h.r) > 0.01) h.r += (targetR - h.r) * Math.min(1, dt*GROW_EASE);
 
-  // swallow + obstacle. A structure is edible once it fits the hole (footprint vs radius); bigger
-  // ones act as walls. Edible cubes under the hole's disc get sucked in.
-  const eatR2 = (h.r*0.96)*(h.r*0.96);
+  // Structures: a structure collapses once the hole reaches its ground footprint (and that
+  // footprint fits the hole). When it collapses, every cube is released to gravity — no magnetic
+  // pull. Structures whose GROUND contact is too wide for the hole act as a wall instead.
+  const r2 = h.r*h.r;
   for(const st of state.structs){
-    if(st.alive<=0) continue;
+    if(st.released || st.alive<=0) continue;
     const ddx=st.cx-h.x, ddz=st.cz-h.z, dc=Math.hypot(ddx,ddz);
-    if(dc > h.r + st.footR + 6) continue;                 // far: skip
-    if(st.footR > h.r*EAT_MARGIN){
-      // too big to swallow: block like a wall so you can't slide under it
-      const min=st.footR + h.r*0.12;
-      if(dc < min && dc>0.001){ const push=(min-dc); h.x += (ddx/dc)* -push; h.z += (ddz/dc)* -push; h.vx*=0.4; h.vz*=0.4; }
-      continue;
-    }
-    // edible: any resting cube whose footprint sits under the hole's disc gets sucked in
-    for(const idx of st.cubeIdx){
-      const c=state.cubes[idx];
-      if(c.dead||c.falling) continue;
-      const cdx=c.x-h.x, cdz=c.z-h.z;
-      if(cdx*cdx+cdz*cdz < eatR2){
-        c.falling=true;
-        c.vx=cdx*-0.3 + rand(-6,6); c.vz=cdz*-0.3 + rand(-6,6); c.vy=rand(8,22);
-        state.falling.push(idx);
+    if(dc > h.r + st.boundR + 8) continue;                // far: skip
+    if(st.groundR <= h.r*EAT_MARGIN){
+      // fits the hole: collapse when the hole's edge touches the ground footprint
+      if(dc < h.r + st.groundR*0.5){
+        st.released=true;
+        for(const idx of st.cubeIdx){ const c=state.cubes[idx]; if(c.state===0){ c.state=1; c.vy=0; state.falling.push(idx); } }
       }
+    } else {
+      // ground footprint too big to fit: wall the hole off (limited strictly by the hole's size)
+      const min=st.groundR + h.r*0.10;
+      if(dc < min && dc>0.001){ const push=(min-dc); h.x -= (ddx/dc)*push; h.z -= (ddz/dc)*push; h.vx*=0.4; h.vz*=0.4; }
     }
   }
 
-  // animate falling cubes into the hole
+  // Falling cubes: pure gravity, no horizontal pull. Over the hole -> fall through and get eaten.
+  // Over solid ground -> land and remain as debris.
   if(state.falling.length){
-    let still=[];
-    const g=140;
+    const G=170; let still=[];
     for(const idx of state.falling){
       const c=state.cubes[idx];
-      // funnel toward hole center while gravity pulls down
-      const tx=h.x - c.x, tz=h.z - c.z;
-      c.vx += tx*2.2*dt; c.vz += tz*2.2*dt; c.vy -= g*dt;
-      c.x += c.vx*dt; c.y += c.vy*dt; c.z += c.vz*dt;
-      const within=Math.hypot(c.x-h.x,c.z-h.z) < h.r*0.5;
-      if((c.y < -c.size*3) || (within && c.y<0)){
-        eatCube(idx);
-      } else {
-        dummy.position.set(c.x,c.y,c.z);
-        dummy.rotation.set(state.t*c.rx*3, state.t*c.ry*3, state.t*c.rz*3);
-        dummy.scale.setScalar(c.size*0.96);
-        dummy.updateMatrix(); cubeMesh.setMatrixAt(idx,dummy.matrix);
-        still.push(idx);
+      c.vy -= G*dt; c.y += c.vy*dt;
+      const dx=c.x-h.x, dz=c.z-h.z; const overHole=(dx*dx+dz*dz) < r2;
+      if(overHole){
+        if(c.y < -c.size*2){ eatCube(idx); continue; }    // dropped into the hole
+      } else if(c.y <= c.landY){
+        c.y=c.landY; c.vy=0; c.state=2; state.landed.push(idx);   // came to rest on the ground
+        dummy.position.set(c.x,c.y,c.z); dummy.rotation.set(0,0,0); dummy.scale.setScalar(c.size*0.96);
+        dummy.updateMatrix(); cubeMesh.setMatrixAt(idx,dummy.matrix); continue;
       }
+      dummy.position.set(c.x,c.y,c.z);
+      dummy.rotation.set(state.t*c.rx*3, state.t*c.ry*3, state.t*c.rz*3);
+      dummy.scale.setScalar(c.size*0.96);
+      dummy.updateMatrix(); cubeMesh.setMatrixAt(idx,dummy.matrix);
+      still.push(idx);
     }
     state.falling=still;
     cubeMesh.instanceMatrix.needsUpdate=true;
+  }
+
+  // Debris on the ground gets vacuumed if the hole later rolls over it.
+  if(state.landed.length){
+    let keep=[];
+    for(const idx of state.landed){
+      const c=state.cubes[idx];
+      const dx=c.x-h.x, dz=c.z-h.z;
+      if(dx*dx+dz*dz < r2){ c.state=1; c.vy=0; state.falling.push(idx); }
+      else keep.push(idx);
+    }
+    state.landed=keep;
   }
 
   // hole visual
@@ -361,7 +378,7 @@ function update(dt){
 
 function eatCube(idx){
   const c=state.cubes[idx];
-  c.dead=true; c.falling=false; c.struct.alive--;
+  c.state=3; c.struct.alive--;   // 3 = consumed
   state.eaten++;
   const ti=clamp(c.struct.tier,0,4);
   state.score += TIER[ti].pts;

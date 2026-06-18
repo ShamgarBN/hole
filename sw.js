@@ -1,5 +1,5 @@
 /* Offline cache so the game loads with no network and zero ads. */
-const CACHE = 'voidling-v3';
+const CACHE = 'voidling-v4';
 const ASSETS = [
   './', './index.html', './game.js', './three.min.js', './manifest.json',
   './icon-180.png', './icon-192.png', './icon-512.png'
