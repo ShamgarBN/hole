@@ -52,9 +52,9 @@ const state = {
   structs:[],          // {cx,cz,footR,tier,alive,cubeIdx:[]}
   falling:[],          // indices currently animating
   cam:{ dist:60, height:90 },
-  input:{ active:false, sx:0, sy:0 },   // finger screen pos
+  // floating joystick: anchor = where the finger first landed; cur = current finger pos
+  input:{ active:false, ax:0, ay:0, cx:0, cy:0 },
   score:0, eaten:0, timeLeft:120, running:false, raf:0, lastTs:0,
-  holeTier:0,
 };
 
 const store = {
@@ -75,16 +75,18 @@ const TIER = [
   { cube:3.8,  grow:0.030, pts:3 },  // 3 houses
   { cube:5.0,  grow:0.040, pts:5 },  // 4 towers/landmarks
 ];
-// hole radius needed to start eating each tier
-const TIER_UNLOCK = [0, 10, 17, 28, 44];
-// Eating a cube banks this much "area" into a reserve (by tier). The hole's radius then climbs
-// toward the reserve at a capped RATE (GROW_RATE) — so growth is always a smooth, steady climb,
-// never a spike, no matter how fast you vacuum, as long as you keep eating. This gives a calm,
-// predictable ~2-minute escalation that suits a wind-down game.
-const GROW_AREA = [9, 9, 10, 12, 16];
-const GROW_RATE = 0.7;     // max radius units gained per second
-const CAP_FRAC  = 0.24;    // hole can grow to this fraction of the arena radius
-function holeTierFor(r){ let t=0; for(let i=0;i<TIER_UNLOCK.length;i++) if(r>=TIER_UNLOCK[i]) t=i; return t; }
+// A structure is edible once it physically fits the hole: its footprint radius must be no larger
+// than the hole radius * EAT_MARGIN. Anything bigger blocks the hole like a wall. This keeps the
+// rule intuitive — if it looks the hole's size or smaller, you can swallow it.
+const EAT_MARGIN = 1.05;
+// Eating a cube banks this much area (by tier) into the hole's reserve; the radius eases toward the
+// reserve. Because the reserve ONLY advances when a cube is eaten, the hole grows strictly while
+// consuming and settles the instant you stop — never on a timer.
+const GROW_AREA = [0.6, 0.8, 1.1, 1.5, 2.2];
+const GROW_EASE = 4;       // how fast the radius eases to the banked reserve (per second)
+const CAP_FRAC  = 0.30;    // hole can grow to this fraction of the arena radius
+const MAX_STICK = 78;      // px of finger travel from anchor that maps to full speed
+const STICK_VIS = 55;      // px the visual thumb is clamped to
 
 // ---------- VOXEL BUILDERS ----------
 // each returns array of {x,y,z (cube-units, y>=0 = stack height), col}
@@ -154,7 +156,7 @@ function buildLevel(theme){
   state.hole={ x:0, z:0, r:7, vx:0, vz:0 };
   state.holeReserve = Math.PI*7*7;   // banked area the radius eases toward
   state.cubes=[]; state.structs=[]; state.falling=[];
-  state.score=0; state.eaten=0; state.holeTier=0;
+  state.score=0; state.eaten=0;
   state.timeLeft = state.mode==='timed' ? 120 : Infinity;
 
   buildWorld(theme);
@@ -234,24 +236,41 @@ function placeHole(){
   holeRing.scale.setScalar(state.hole.r);
 }
 
-// ---------- INPUT ----------
+// ---------- INPUT (floating joystick) ----------
 function pt(e){ const t=e.touches?e.touches[0]:e; return {x:t.clientX,y:t.clientY}; }
-function onDown(e){ if(state.scene!=='play')return; state.input.active=true; const p=pt(e); state.input.sx=p.x; state.input.sy=p.y; e.preventDefault(); }
-function onMove(e){ if(!state.input.active)return; const p=pt(e); state.input.sx=p.x; state.input.sy=p.y; e.preventDefault(); }
-function onUp(){ state.input.active=false; }
+function onDown(e){
+  if(state.scene!=='play')return;
+  const p=pt(e); const i=state.input;
+  i.active=true; i.ax=p.x; i.ay=p.y; i.cx=p.x; i.cy=p.y;   // anchor wherever the finger lands
+  showStick(); e.preventDefault();
+}
+function onMove(e){ if(!state.input.active)return; const p=pt(e); state.input.cx=p.x; state.input.cy=p.y; moveStick(); e.preventDefault(); }
+function onUp(){ state.input.active=false; $('stick').classList.add('hidden'); }
+function showStick(){
+  const i=state.input;
+  $('stickBase').style.left=i.ax+'px'; $('stickBase').style.top=i.ay+'px';
+  $('stickThumb').style.left=i.ax+'px'; $('stickThumb').style.top=i.ay+'px';
+  $('stick').classList.remove('hidden');
+}
+function moveStick(){
+  const i=state.input;
+  let dx=i.cx-i.ax, dy=i.cy-i.ay; const d=Math.hypot(dx,dy);
+  if(d>STICK_VIS){ dx=dx/d*STICK_VIS; dy=dy/d*STICK_VIS; }
+  $('stickThumb').style.left=(i.ax+dx)+'px'; $('stickThumb').style.top=(i.ay+dy)+'px';
+}
 
 // ---------- UPDATE ----------
 function update(dt){
   const h=state.hole;
 
-  // steering: finger offset from screen center -> world XZ direction
+  // steering: motion relative to the floating-joystick anchor (where the finger first landed)
   if(state.input.active){
-    let dx=state.input.sx - window.innerWidth/2;
-    let dy=state.input.sy - window.innerHeight/2;
+    let dx=state.input.cx - state.input.ax;
+    let dy=state.input.cy - state.input.ay;
     const d=Math.hypot(dx,dy);
-    if(d>4){
+    if(d>3){
       dx/=d; dy/=d;
-      const speed = (90 + Math.min(h.r,45)*1.3) * clamp(d/110,0,1);
+      const speed = (90 + Math.min(h.r,45)*1.3) * clamp(d/MAX_STICK,0,1);
       h.vx += (dx*speed - h.vx)*Math.min(1,dt*8);
       h.vz += (dy*speed - h.vz)*Math.min(1,dt*8);
     }
@@ -263,30 +282,31 @@ function update(dt){
   const hd=Math.hypot(h.x,h.z);
   if(hd>maxR){ const a=Math.atan2(h.z,h.x); h.x=Math.cos(a)*maxR; h.z=Math.sin(a)*maxR; h.vx*=0.4; h.vz*=0.4; }
 
-  // steady, rate-limited growth toward the banked reserve
+  // growth: ease toward the banked reserve. The reserve only grows when cubes are eaten, so the
+  // radius climbs strictly while consuming and settles within a fraction of a second of stopping.
   const capR = state.worldR*CAP_FRAC;
   const targetR = Math.min(Math.sqrt(state.holeReserve/Math.PI), capR);
-  if(h.r < targetR) h.r = Math.min(targetR, h.r + GROW_RATE*dt);
-  state.holeTier = holeTierFor(h.r);
+  if(Math.abs(targetR - h.r) > 0.01) h.r += (targetR - h.r) * Math.min(1, dt*GROW_EASE);
 
-  // swallow + obstacle
-  const r2=h.r*h.r;
+  // swallow + obstacle. A structure is edible once it fits the hole (footprint vs radius); bigger
+  // ones act as walls. Edible cubes under the hole's disc get sucked in.
+  const eatR2 = (h.r*0.96)*(h.r*0.96);
   for(const st of state.structs){
     if(st.alive<=0) continue;
     const ddx=st.cx-h.x, ddz=st.cz-h.z, dc=Math.hypot(ddx,ddz);
     if(dc > h.r + st.footR + 6) continue;                 // far: skip
-    if(st.tier > state.holeTier){
-      // too big to eat: gently block so you bump off it
-      const min=h.r*0.8 + st.footR*0.6;
-      if(dc < min && dc>0.001){ const push=(min-dc); h.x -= (ddx/dc)*push*0.6; h.z -= (ddz/dc)*push*0.6; h.vx*=0.5; h.vz*=0.5; }
+    if(st.footR > h.r*EAT_MARGIN){
+      // too big to swallow: block like a wall so you can't slide under it
+      const min=st.footR + h.r*0.12;
+      if(dc < min && dc>0.001){ const push=(min-dc); h.x += (ddx/dc)* -push; h.z += (ddz/dc)* -push; h.vx*=0.4; h.vz*=0.4; }
       continue;
     }
-    // eatable: any resting cube whose footprint is inside the hole gets sucked in
+    // edible: any resting cube whose footprint sits under the hole's disc gets sucked in
     for(const idx of st.cubeIdx){
       const c=state.cubes[idx];
       if(c.dead||c.falling) continue;
       const cdx=c.x-h.x, cdz=c.z-h.z;
-      if(cdx*cdx+cdz*cdz < r2*0.92){
+      if(cdx*cdx+cdz*cdz < eatR2){
         c.falling=true;
         c.vx=cdx*-0.3 + rand(-6,6); c.vz=cdz*-0.3 + rand(-6,6); c.vy=rand(8,22);
         state.falling.push(idx);
@@ -433,7 +453,7 @@ function endGame(){
   hideAll(); $('results').classList.remove('hidden'); $('results').classList.add('fade-in');
 }
 function pickPraise(){ const p=['Nice run!','Cosmic.','Devoured!','So satisfying.','The void is pleased.','Whole lotta hole.','Time well killed.']; return p[Math.floor(Math.random()*p.length)]; }
-function hideAll(){ ['menu','picker','pause','results','hud'].forEach(id=>$(id).classList.add('hidden')); }
+function hideAll(){ ['menu','picker','pause','results','hud','stick'].forEach(id=>$(id).classList.add('hidden')); state.input.active=false; }
 function toMenu(){ state.running=false; cancelAnimationFrame(state.raf); state.scene='menu'; hideAll(); $('menu').classList.remove('hidden'); $('bestScore').textContent=store.best; }
 function randomTheme(){ return THEMES[Math.floor(Math.random()*THEMES.length)]; }
 

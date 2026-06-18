@@ -85,6 +85,15 @@
   .statline b{color:var(--ink);}
   .fade-in{animation:fade .4s ease both;}
   @keyframes fade{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:none;}}
+
+  /* floating joystick */
+  #stick{position:fixed;inset:0;z-index:6;pointer-events:none;}
+  #stickBase,#stickThumb{position:fixed;border-radius:50%;transform:translate(-50%,-50%);
+    will-change:left,top;pointer-events:none;}
+  #stickBase{width:120px;height:120px;border:2px solid rgba(255,255,255,.22);
+    background:radial-gradient(circle, rgba(255,255,255,.10), rgba(255,255,255,.03));}
+  #stickThumb{width:58px;height:58px;border:2px solid rgba(255,255,255,.55);
+    background:rgba(255,255,255,.20);box-shadow:0 2px 16px rgba(0,0,0,.3);}
 </style>
 </head>
 <body>
@@ -103,6 +112,7 @@
 </div>
 <div id="levelTitle"></div>
 <div id="toast" class="toast"></div>
+<div id="stick" class="hidden"><div id="stickBase"></div><div id="stickThumb"></div></div>
 
 <!-- Start menu -->
 <div id="menu" class="overlay">
