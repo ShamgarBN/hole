@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0d1326">
+<title>Voidling — chill hole game</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
+<style>
+  :root{
+    --bg:#0d1326;
+    --panel:rgba(16,22,44,0.82);
+    --ink:#eef2ff;
+    --muted:#9aa6d4;
+    --accent:#7c9cff;
+    --good:#5ff0b0;
+    --warn:#ffcf6b;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    overscroll-behavior:none;touch-action:none;user-select:none;-webkit-user-select:none;}
+  #game{display:block;position:fixed;inset:0;width:100%;height:100%;}
+
+  .overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;padding:24px;text-align:center;z-index:10;
+    background:radial-gradient(120% 90% at 50% 0%, rgba(40,52,110,0.55), rgba(8,11,24,0.94));
+    backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);}
+  .hidden{display:none !important;}
+
+  .logo{font-size:clamp(38px,11vw,68px);font-weight:800;letter-spacing:-1.5px;
+    background:linear-gradient(120deg,#9ab4ff,#7cf0c8 60%,#ffd27c);
+    -webkit-background-clip:text;background-clip:text;color:transparent;}
+  .tag{color:var(--muted);margin-top:6px;font-size:15px;max-width:340px;}
+
+  .btn{appearance:none;border:none;border-radius:16px;padding:16px 26px;margin-top:10px;
+    font-size:18px;font-weight:700;color:#0b1020;cursor:pointer;
+    background:linear-gradient(120deg,#9ab4ff,#7cf0c8);box-shadow:0 8px 30px rgba(124,156,255,.35);
+    transition:transform .08s ease;min-width:220px;}
+  .btn:active{transform:scale(.96);}
+  .btn.ghost{background:var(--panel);color:var(--ink);border:1px solid rgba(255,255,255,.12);
+    box-shadow:none;font-weight:600;font-size:16px;min-width:0;padding:12px 18px;}
+
+  .row{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-top:18px;max-width:480px;}
+  .mode{display:flex;gap:8px;margin-top:16px;}
+  .chip{background:var(--panel);border:1px solid rgba(255,255,255,.12);color:var(--muted);
+    padding:9px 16px;border-radius:999px;font-size:14px;font-weight:600;cursor:pointer;}
+  .chip.on{color:#0b1020;background:linear-gradient(120deg,#9ab4ff,#7cf0c8);border-color:transparent;}
+
+  .levels{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px;
+    width:100%;max-width:480px;margin-top:18px;max-height:42vh;overflow-y:auto;
+    -webkit-overflow-scrolling:touch;padding:4px;}
+  .lvl{background:var(--panel);border:1px solid rgba(255,255,255,.1);border-radius:14px;
+    padding:12px 6px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:4px;
+    transition:transform .08s ease;}
+  .lvl:active{transform:scale(.94);}
+  .lvl .emo{font-size:26px;}
+  .lvl .nm{font-size:11px;color:var(--muted);font-weight:600;line-height:1.1;}
+  .lvl.lock{opacity:.4;}
+
+  /* HUD */
+  #hud{position:fixed;top:0;left:0;right:0;z-index:5;padding:14px 16px;
+    padding-top:calc(14px + env(safe-area-inset-top));
+    display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none;}
+  .hudbox{background:var(--panel);border:1px solid rgba(255,255,255,.1);border-radius:14px;
+    padding:8px 14px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);}
+  .hudlabel{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;font-weight:700;}
+  .hudval{font-size:22px;font-weight:800;line-height:1;}
+  #timeBox .hudval.low{color:var(--warn);}
+  #pauseBtn{pointer-events:auto;width:42px;height:42px;border-radius:12px;background:var(--panel);
+    border:1px solid rgba(255,255,255,.1);color:var(--ink);font-size:18px;display:flex;
+    align-items:center;justify-content:center;}
+  #levelTitle{position:fixed;top:50%;left:0;right:0;text-align:center;z-index:4;pointer-events:none;
+    font-size:clamp(26px,8vw,44px);font-weight:800;letter-spacing:-1px;opacity:0;
+    text-shadow:0 4px 24px rgba(0,0,0,.6);}
+  .toast{position:fixed;left:50%;top:22%;transform:translateX(-50%);z-index:6;pointer-events:none;
+    font-weight:800;font-size:20px;color:var(--good);text-shadow:0 2px 10px rgba(0,0,0,.5);opacity:0;}
+
+  .big{font-size:clamp(30px,9vw,52px);font-weight:800;margin-bottom:4px;}
+  .statline{color:var(--muted);font-size:16px;margin:2px 0;}
+  .statline b{color:var(--ink);}
+  .fade-in{animation:fade .4s ease both;}
+  @keyframes fade{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:none;}}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<!-- HUD -->
+<div id="hud" class="hidden">
+  <div style="display:flex;gap:10px;align-items:flex-start;">
+    <div class="hudbox" id="scoreBox"><div class="hudlabel">Score</div><div class="hudval" id="scoreVal">0</div></div>
+    <div class="hudbox" id="sizeBox"><div class="hudlabel">Size</div><div class="hudval" id="sizeVal">1</div></div>
+  </div>
+  <div style="display:flex;gap:10px;align-items:flex-start;">
+    <div class="hudbox" id="timeBox"><div class="hudlabel">Time</div><div class="hudval" id="timeVal">2:00</div></div>
+    <button id="pauseBtn">❚❚</button>
+  </div>
+</div>
+<div id="levelTitle"></div>
+<div id="toast" class="toast"></div>
+
+<!-- Start menu -->
+<div id="menu" class="overlay">
+  <div class="logo">Voidling</div>
+  <div class="tag">Drag anywhere to steer the void. Voxel worlds crumble cube-by-cube into the hole. Grow huge, repeat. No ads, ever.</div>
+  <div class="mode">
+    <div class="chip on" data-mode="zen">🌙 Zen (no timer)</div>
+    <div class="chip" data-mode="timed">⏱ Timed</div>
+  </div>
+  <button class="btn" id="playRandom">▶ Play Random Level</button>
+  <button class="btn ghost" id="pickLevel">Choose a level</button>
+  <div class="statline" style="margin-top:14px;">Best score: <b id="bestScore">0</b></div>
+</div>
+
+<!-- Level picker -->
+<div id="picker" class="overlay hidden">
+  <div class="logo" style="font-size:clamp(28px,8vw,44px)">Level Library</div>
+  <div class="tag" id="pickerSub">Every level reshuffles its layout each time you play.</div>
+  <div class="levels" id="levelGrid"></div>
+  <button class="btn ghost" id="backToMenu" style="margin-top:18px;">← Back</button>
+</div>
+
+<!-- Pause -->
+<div id="pause" class="overlay hidden">
+  <div class="logo" style="font-size:clamp(30px,8vw,46px)">Paused</div>
+  <button class="btn" id="resumeBtn">▶ Resume</button>
+  <button class="btn ghost" id="restartBtn">↻ Restart level</button>
+  <button class="btn ghost" id="quitBtn">⌂ Main menu</button>
+</div>
+
+<!-- Game over / results -->
+<div id="results" class="overlay hidden">
+  <div class="big" id="resTitle">Nice run!</div>
+  <div class="statline" id="resLevel"></div>
+  <div class="statline">Score: <b id="resScore">0</b></div>
+  <div class="statline">Final size: <b id="resSize">1</b></div>
+  <div class="statline">Things swallowed: <b id="resEaten">0</b></div>
+  <div class="statline" id="resBest" style="color:var(--good);margin-top:8px;"></div>
+  <button class="btn" id="againBtn" style="margin-top:18px;">↻ Play again</button>
+  <button class="btn ghost" id="nextBtn">→ Next random level</button>
+  <button class="btn ghost" id="menuBtn">⌂ Main menu</button>
+</div>
+
+<script src="three.min.js"></script>
+<script src="game.js"></script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(()=>{}));
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+# dev tooling / local
+.claude/
+.DS_Store
+*.log
+
+# build artifacts
+*.dmg

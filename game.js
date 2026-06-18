@@ -1,0 +1,487 @@
+/* Voidling 3D — a chill hole.io-style time killer built from break-apart voxels.
+   Three.js (vendored, offline). Everything in the world is made of tiny cubes; as your
+   hole's edge passes over a structure you're big enough for, its cubes tumble in one by
+   one. Higher tiers are built from chunkier cubes, so the world gets blockier as you grow. */
+
+(() => {
+'use strict';
+const T = window.THREE;
+
+// ---------- LEVEL LIBRARY ----------
+// Each theme = color mood. Shapes are generic voxel forms tinted from `pal`.
+// sky/ground/grid set the world colors; pal[] colors the structures; leaf/trunk for trees.
+const THEMES = [
+  { id:'downtown', name:'Downtown',  emo:'🏙️', sky:0x141b34, ground:0x222d52, grid:0x33406e,
+    pal:[0x6f7bdc,0x9aa6e8,0xc7ccf2,0xe05a6a,0xf0a85a,0x5ad0e0], leaf:0x4caf6a, trunk:0x7a5a3a },
+  { id:'beach', name:'Beach Day', emo:'🏖️', sky:0x123047, ground:0x1d6a7e, grid:0x2a8aa0,
+    pal:[0xffe08a,0xffc14d,0xff8c5a,0x5fd0c0,0x4aa8d0,0xffffff], leaf:0x57c08a, trunk:0x9a7a4a },
+  { id:'park', name:'City Park', emo:'🌳', sky:0x15331f, ground:0x214a2b, grid:0x2e6638,
+    pal:[0x6fbf5a,0x4ca04a,0xe0d060,0xd0905a,0xa0c060,0xf0f0e0], leaf:0x49b25a, trunk:0x6a4a2a },
+  { id:'space', name:'Orbit Station', emo:'🛰️', sky:0x07071a, ground:0x10122e, grid:0x232858,
+    pal:[0xd0d6ff,0x9aa6ff,0x7c8cff,0xe0e0e0,0xffd24d,0xff6a6a], leaf:0x8a9aff, trunk:0x5a5a7a },
+  { id:'candy', name:'Candy Land', emo:'🍬', sky:0x3a1840, ground:0x52215a, grid:0x6e2e78,
+    pal:[0xff8ad0,0xff5aa8,0xffd24d,0x8affd0,0x9a8aff,0xffffff], leaf:0xff8ad0, trunk:0xc06aa0 },
+  { id:'farm', name:'Funny Farm', emo:'🚜', sky:0x2a2410, ground:0x4a4018, grid:0x665826,
+    pal:[0xe0c060,0xd0a040,0xc06a40,0xe05a4a,0x90b050,0xf0e0c0], leaf:0x8ab050, trunk:0x7a5a30 },
+  { id:'winter', name:'Snow Town', emo:'❄️', sky:0x1c2940, ground:0x35496b, grid:0x4a6088,
+    pal:[0xffffff,0xd0e0ff,0xa0c0e0,0xe05a5a,0x5ac0d0,0xc0d0e0], leaf:0xe8f0ff, trunk:0x8a98b0 },
+  { id:'neon', name:'Neon Nights', emo:'🌃', sky:0x0a0820, ground:0x18103a, grid:0x2e1c66,
+    pal:[0xff4dd8,0x4dd0ff,0x9a4dff,0x4dff9a,0xffe04d,0xff5a7a], leaf:0x4dff9a, trunk:0x6a4d9a },
+  { id:'jungle', name:'Jungle Ruins', emo:'🐘', sky:0x0e2410, ground:0x1a3a1a, grid:0x265a26,
+    pal:[0x6fae4a,0x4c8a3a,0xa0c060,0xc0a070,0x8a9a5a,0xd0c0a0], leaf:0x4fa24a, trunk:0x6a4a2a },
+  { id:'office', name:'The Office', emo:'🖇️', sky:0x202024, ground:0x303036, grid:0x44444e,
+    pal:[0xc0c0cc,0x9aa0b0,0x6a8ad0,0xe0e0e8,0x70b070,0xd0a050], leaf:0x70b070, trunk:0x8a8a8a },
+  { id:'kitchen', name:'Giant Kitchen', emo:'🍳', sky:0x2b2218, ground:0x4a3a26, grid:0x66502e,
+    pal:[0xf0e0c0,0xe0c090,0xd0a060,0xe05a4a,0x9ac0d0,0xffffff], leaf:0x9ac0a0, trunk:0x9a7a4a },
+  { id:'dino', name:'Dino Valley', emo:'🦕', sky:0x231a10, ground:0x4a371a, grid:0x665026,
+    pal:[0x8aae5a,0x6f8a4a,0xc0a070,0xd07a4a,0xa0905a,0xe0c0a0], leaf:0x6fae5a, trunk:0x7a5a30 },
+];
+
+// ---------- ENGINE GLOBALS ----------
+let renderer, scene, camera, dirLight, ground, gridMesh, holeDisc, holeRing, cubeMesh;
+const dummy = new T.Object3D();
+const _c = new T.Color();
+let boxGeo;
+
+// ---------- STATE ----------
+const state = {
+  scene:'menu', mode:'zen', theme:null, t:0,
+  worldR: 380,
+  hole:{ x:0, z:0, r:7, vx:0, vz:0 },
+  cubes:[],            // {x,y,z,size,col,rest:{x,y,z}, dead, falling, vx,vy,vz, struct}
+  structs:[],          // {cx,cz,footR,tier,alive,cubeIdx:[]}
+  falling:[],          // indices currently animating
+  cam:{ dist:60, height:90 },
+  input:{ active:false, sx:0, sy:0 },   // finger screen pos
+  score:0, eaten:0, timeLeft:120, running:false, raf:0, lastTs:0,
+  holeTier:0,
+};
+
+const store = {
+  best: +(localStorage.getItem('voidling.best')||0),
+  save(){ localStorage.setItem('voidling.best', this.best); },
+};
+
+function $(id){return document.getElementById(id);}
+const rand=(a,b)=>a+Math.random()*(b-a);
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+
+// ---------- TIERS ----------
+// cube size grows with tier -> world gets chunkier as you progress.
+const TIER = [
+  { cube:1.6,  grow:0.018, pts:1 },  // 0 pebbles/crates
+  { cube:2.2,  grow:0.020, pts:1 },  // 1 cars/bushes
+  { cube:2.9,  grow:0.024, pts:2 },  // 2 trees/huts
+  { cube:3.8,  grow:0.030, pts:3 },  // 3 houses
+  { cube:5.0,  grow:0.040, pts:5 },  // 4 towers/landmarks
+];
+// hole radius needed to start eating each tier
+const TIER_UNLOCK = [0, 10, 17, 28, 44];
+// Eating a cube banks this much "area" into a reserve (by tier). The hole's radius then climbs
+// toward the reserve at a capped RATE (GROW_RATE) — so growth is always a smooth, steady climb,
+// never a spike, no matter how fast you vacuum, as long as you keep eating. This gives a calm,
+// predictable ~2-minute escalation that suits a wind-down game.
+const GROW_AREA = [9, 9, 10, 12, 16];
+const GROW_RATE = 0.7;     // max radius units gained per second
+const CAP_FRAC  = 0.24;    // hole can grow to this fraction of the arena radius
+function holeTierFor(r){ let t=0; for(let i=0;i<TIER_UNLOCK.length;i++) if(r>=TIER_UNLOCK[i]) t=i; return t; }
+
+// ---------- VOXEL BUILDERS ----------
+// each returns array of {x,y,z (cube-units, y>=0 = stack height), col}
+function jit(hex){ _c.setHex(hex); const k=rand(0.86,1.12); return (Math.min(255,(_c.r*k*255))<<16)|(Math.min(255,(_c.g*k*255))<<8)|Math.min(255,(_c.b*k*255)); }
+function jc(hex){ _c.setHex(hex); const k=rand(0.86,1.12); _c.r=clamp(_c.r*k,0,1); _c.g=clamp(_c.g*k,0,1); _c.b=clamp(_c.b*k,0,1); return _c.clone(); }
+
+function vbox(w,h,d, shell, hex){
+  const out=[]; const ox=(w-1)/2, oz=(d-1)/2;
+  for(let x=0;x<w;x++)for(let y=0;y<h;y++)for(let z=0;z<d;z++){
+    const edge = x===0||x===w-1||z===0||z===d-1||y===0||y===h-1;
+    if(shell && !edge) continue;
+    out.push({x:x-ox,y,z:z-oz,col:jc(hex)});
+  }
+  return out;
+}
+function vsphere(r, cy, hex, fill){
+  const out=[]; const R=Math.ceil(r);
+  for(let x=-R;x<=R;x++)for(let y=-R;y<=R;y++)for(let z=-R;z<=R;z++){
+    const d=Math.sqrt(x*x+y*y+z*z);
+    if(d>r) continue;
+    if(!fill && d<r-1.05) continue;
+    out.push({x,y:cy+y,z,col:jc(hex)});
+  }
+  return out;
+}
+function vrock(hex){
+  const out=[]; const n=Math.floor(rand(4,9));
+  out.push({x:0,y:0,z:0,col:jc(hex)});
+  for(let i=0;i<n;i++) out.push({x:Math.round(rand(-1,1)),y:Math.round(rand(0,1)),z:Math.round(rand(-1,1)),col:jc(hex)});
+  return out;
+}
+function vcar(hex){
+  const body=vbox(4,1,2,false,hex);          // chassis
+  const cab=vbox(2,1,2,false,hex).map(c=>({x:c.x,y:1,z:c.z,col:c.col})); // cabin
+  return body.concat(cab);
+}
+
+function makeStruct(tier, theme){
+  const pal=theme.pal;
+  const pick=()=>pal[Math.floor(Math.random()*pal.length)];
+  let cubes, footW, footD;
+  if(tier===0){ cubes=vrock(pick()); footW=footD=2; }
+  else if(tier===1){
+    if(Math.random()<0.5){ cubes=vcar(pick()); footW=4; footD=2; }
+    else { cubes=vsphere(rand(1.6,2.2),2, theme.leaf, true).concat(vbox(1,2,1,false,theme.trunk)); footW=footD=4; }
+  }
+  else if(tier===2){
+    const th=Math.floor(rand(3,5)); const cr=rand(2.2,2.8);
+    cubes=vbox(1,th,1,false,theme.trunk).concat(vsphere(cr, th+cr-1, theme.leaf, true));
+    footW=footD=Math.ceil(cr*2);
+  }
+  else if(tier===3){
+    const w=Math.floor(rand(4,6)), h=Math.floor(rand(5,8)), d=Math.floor(rand(4,6));
+    cubes=vbox(w,h,d,true,pick()); footW=w; footD=d;
+  }
+  else {
+    const w=Math.floor(rand(3,5)), h=Math.floor(rand(11,16)), d=Math.floor(rand(3,5));
+    cubes=vbox(w,h,d,true,pick()); footW=w; footD=d;
+  }
+  return { cubes, footR: Math.max(footW,footD)/2 * TIER[tier].cube };
+}
+
+// ---------- LEVEL BUILD ----------
+function buildLevel(theme){
+  state.theme=theme;
+  state.worldR = 300 + Math.random()*100;
+  state.hole={ x:0, z:0, r:7, vx:0, vz:0 };
+  state.holeReserve = Math.PI*7*7;   // banked area the radius eases toward
+  state.cubes=[]; state.structs=[]; state.falling=[];
+  state.score=0; state.eaten=0; state.holeTier=0;
+  state.timeLeft = state.mode==='timed' ? 120 : Infinity;
+
+  buildWorld(theme);
+
+  // place structures within a cube budget
+  const weights=[0.30,0.30,0.22,0.13,0.05];
+  const cum=[]; let s=0; for(const w of weights){s+=w;cum.push(s);}
+  const CUBE_BUDGET=16000, MAX_STRUCT=260;
+  const placed=[];
+  let guard=0;
+  while(state.cubes.length<CUBE_BUDGET && state.structs.length<MAX_STRUCT && guard++<4000){
+    const r=Math.random(); let tier=0; for(let i=0;i<cum.length;i++) if(r<=cum[i]){tier=i;break;}
+    const st=makeStruct(tier, theme);
+    // find a spot
+    let cx,cz,ok=false;
+    for(let a=0;a<14;a++){
+      const ang=rand(0,Math.PI*2), rad=Math.sqrt(Math.random())*(state.worldR-20-st.footR);
+      cx=Math.cos(ang)*rad; cz=Math.sin(ang)*rad;
+      if(Math.hypot(cx,cz) < 26+st.footR) continue;        // keep spawn area clear
+      ok=true;
+      for(const p of placed){ if(Math.hypot(cx-p.cx,cz-p.cz) < (st.footR+p.footR)*0.6){ok=false;break;} }
+      if(ok) break;
+    }
+    if(!ok) continue;
+    const cs=TIER[tier].cube;
+    const struct={ cx, cz, footR:st.footR, tier, alive:st.cubes.length, cubeIdx:[] };
+    for(const c of st.cubes){
+      const wx=cx + c.x*cs, wy=(c.y+0.5)*cs, wz=cz + c.z*cs;
+      const idx=state.cubes.length;
+      state.cubes.push({ x:wx,y:wy,z:wz, size:cs, col:c.col, rest:{x:wx,y:wy,z:wz},
+        dead:false, falling:false, vx:0,vy:0,vz:0, rx:rand(-1,1),ry:rand(-1,1),rz:rand(-1,1), struct });
+      struct.cubeIdx.push(idx);
+    }
+    state.structs.push(struct);
+    placed.push({cx,cz,footR:st.footR});
+  }
+
+  buildCubeMesh();
+  placeHole();
+}
+
+function buildWorld(theme){
+  scene.background = new T.Color(theme.sky);
+  scene.fog = new T.Fog(theme.sky, state.worldR*0.7, state.worldR*1.7);
+  renderer.setClearColor(theme.sky, 1);
+
+  if(ground){ scene.remove(ground); ground.geometry.dispose(); ground.material.map&&ground.material.map.dispose(); ground.material.dispose(); }
+  // grid texture
+  const cv=document.createElement('canvas'); cv.width=cv.height=256; const g=cv.getContext('2d');
+  g.fillStyle='#'+theme.ground.toString(16).padStart(6,'0'); g.fillRect(0,0,256,256);
+  g.strokeStyle='#'+theme.grid.toString(16).padStart(6,'0'); g.lineWidth=4;
+  g.strokeRect(0,0,256,256);
+  const tex=new T.CanvasTexture(cv); tex.wrapS=tex.wrapT=T.RepeatWrapping; tex.repeat.set(40,40);
+  const gm=new T.Mesh(new T.CircleGeometry(state.worldR,72),
+    new T.MeshLambertMaterial({map:tex, color:0xffffff}));
+  gm.rotation.x=-Math.PI/2; gm.position.y=0; ground=gm; scene.add(ground);
+}
+
+function buildCubeMesh(){
+  if(cubeMesh){ scene.remove(cubeMesh); cubeMesh.dispose(); }
+  const n=state.cubes.length || 1;
+  cubeMesh=new T.InstancedMesh(boxGeo, new T.MeshLambertMaterial({color:0xffffff}), n);
+  cubeMesh.instanceMatrix.setUsage(T.DynamicDrawUsage);
+  for(let i=0;i<state.cubes.length;i++){
+    const c=state.cubes[i];
+    dummy.position.set(c.x,c.y,c.z); dummy.rotation.set(0,0,0); dummy.scale.setScalar(c.size*0.96);
+    dummy.updateMatrix(); cubeMesh.setMatrixAt(i, dummy.matrix);
+    cubeMesh.setColorAt(i, c.col);
+  }
+  cubeMesh.instanceMatrix.needsUpdate=true;
+  if(cubeMesh.instanceColor) cubeMesh.instanceColor.needsUpdate=true;
+  scene.add(cubeMesh);
+}
+
+function placeHole(){
+  holeDisc.scale.setScalar(state.hole.r);
+  holeRing.scale.setScalar(state.hole.r);
+}
+
+// ---------- INPUT ----------
+function pt(e){ const t=e.touches?e.touches[0]:e; return {x:t.clientX,y:t.clientY}; }
+function onDown(e){ if(state.scene!=='play')return; state.input.active=true; const p=pt(e); state.input.sx=p.x; state.input.sy=p.y; e.preventDefault(); }
+function onMove(e){ if(!state.input.active)return; const p=pt(e); state.input.sx=p.x; state.input.sy=p.y; e.preventDefault(); }
+function onUp(){ state.input.active=false; }
+
+// ---------- UPDATE ----------
+function update(dt){
+  const h=state.hole;
+
+  // steering: finger offset from screen center -> world XZ direction
+  if(state.input.active){
+    let dx=state.input.sx - window.innerWidth/2;
+    let dy=state.input.sy - window.innerHeight/2;
+    const d=Math.hypot(dx,dy);
+    if(d>4){
+      dx/=d; dy/=d;
+      const speed = (90 + Math.min(h.r,45)*1.3) * clamp(d/110,0,1);
+      h.vx += (dx*speed - h.vx)*Math.min(1,dt*8);
+      h.vz += (dy*speed - h.vz)*Math.min(1,dt*8);
+    }
+  } else { h.vx*=Math.pow(0.0002,dt); h.vz*=Math.pow(0.0002,dt); }
+  h.x += h.vx*dt; h.z += h.vz*dt;
+
+  // arena clamp
+  const maxR=state.worldR - h.r*0.5;
+  const hd=Math.hypot(h.x,h.z);
+  if(hd>maxR){ const a=Math.atan2(h.z,h.x); h.x=Math.cos(a)*maxR; h.z=Math.sin(a)*maxR; h.vx*=0.4; h.vz*=0.4; }
+
+  // steady, rate-limited growth toward the banked reserve
+  const capR = state.worldR*CAP_FRAC;
+  const targetR = Math.min(Math.sqrt(state.holeReserve/Math.PI), capR);
+  if(h.r < targetR) h.r = Math.min(targetR, h.r + GROW_RATE*dt);
+  state.holeTier = holeTierFor(h.r);
+
+  // swallow + obstacle
+  const r2=h.r*h.r;
+  for(const st of state.structs){
+    if(st.alive<=0) continue;
+    const ddx=st.cx-h.x, ddz=st.cz-h.z, dc=Math.hypot(ddx,ddz);
+    if(dc > h.r + st.footR + 6) continue;                 // far: skip
+    if(st.tier > state.holeTier){
+      // too big to eat: gently block so you bump off it
+      const min=h.r*0.8 + st.footR*0.6;
+      if(dc < min && dc>0.001){ const push=(min-dc); h.x -= (ddx/dc)*push*0.6; h.z -= (ddz/dc)*push*0.6; h.vx*=0.5; h.vz*=0.5; }
+      continue;
+    }
+    // eatable: any resting cube whose footprint is inside the hole gets sucked in
+    for(const idx of st.cubeIdx){
+      const c=state.cubes[idx];
+      if(c.dead||c.falling) continue;
+      const cdx=c.x-h.x, cdz=c.z-h.z;
+      if(cdx*cdx+cdz*cdz < r2*0.92){
+        c.falling=true;
+        c.vx=cdx*-0.3 + rand(-6,6); c.vz=cdz*-0.3 + rand(-6,6); c.vy=rand(8,22);
+        state.falling.push(idx);
+      }
+    }
+  }
+
+  // animate falling cubes into the hole
+  if(state.falling.length){
+    let still=[];
+    const g=140;
+    for(const idx of state.falling){
+      const c=state.cubes[idx];
+      // funnel toward hole center while gravity pulls down
+      const tx=h.x - c.x, tz=h.z - c.z;
+      c.vx += tx*2.2*dt; c.vz += tz*2.2*dt; c.vy -= g*dt;
+      c.x += c.vx*dt; c.y += c.vy*dt; c.z += c.vz*dt;
+      const within=Math.hypot(c.x-h.x,c.z-h.z) < h.r*0.5;
+      if((c.y < -c.size*3) || (within && c.y<0)){
+        eatCube(idx);
+      } else {
+        dummy.position.set(c.x,c.y,c.z);
+        dummy.rotation.set(state.t*c.rx*3, state.t*c.ry*3, state.t*c.rz*3);
+        dummy.scale.setScalar(c.size*0.96);
+        dummy.updateMatrix(); cubeMesh.setMatrixAt(idx,dummy.matrix);
+        still.push(idx);
+      }
+    }
+    state.falling=still;
+    cubeMesh.instanceMatrix.needsUpdate=true;
+  }
+
+  // hole visual
+  holeDisc.scale.setScalar(h.r); holeRing.scale.setScalar(h.r);
+  holeDisc.position.set(h.x,0.06,h.z); holeRing.position.set(h.x,0.08,h.z);
+  holeRing.rotation.z = state.t*0.6;
+
+  // camera follow + pull back as you grow
+  const targetDist = 34 + h.r*2.4;
+  const targetHt   = 48 + h.r*3.2;
+  state.cam.dist += (targetDist-state.cam.dist)*Math.min(1,dt*3);
+  state.cam.height += (targetHt-state.cam.height)*Math.min(1,dt*3);
+  camera.position.set(h.x, state.cam.height, h.z + state.cam.dist);
+  camera.lookAt(h.x, 0, h.z);
+
+  // timer
+  if(state.mode==='timed' && isFinite(state.timeLeft)){
+    state.timeLeft-=dt; if(state.timeLeft<=0){ state.timeLeft=0; endGame(); }
+  }
+  updateHud();
+}
+
+function eatCube(idx){
+  const c=state.cubes[idx];
+  c.dead=true; c.falling=false; c.struct.alive--;
+  state.eaten++;
+  const ti=clamp(c.struct.tier,0,4);
+  state.score += TIER[ti].pts;
+  // bank growth into the reserve; the radius eases toward it at a capped rate (see update()).
+  state.holeReserve += GROW_AREA[ti];
+  // hide instance
+  dummy.position.set(0,-9999,0); dummy.scale.setScalar(0.0001); dummy.rotation.set(0,0,0);
+  dummy.updateMatrix(); cubeMesh.setMatrixAt(idx,dummy.matrix);
+  if(c.size>=3.5 && state.eaten%7===0) bigToast('+'+TIER[4].pts);
+}
+
+// ---------- RENDER LOOP ----------
+function frame(ts){
+  if(!state.running) return;
+  const dt=Math.min((ts-state.lastTs)/1000||0, 0.05);
+  state.lastTs=ts; state.t+=dt;
+  update(dt);
+  renderer.render(scene,camera);
+  state.raf=requestAnimationFrame(frame);
+}
+
+// ---------- HUD ----------
+function updateHud(){
+  $('scoreVal').textContent=state.score;
+  $('sizeVal').textContent=Math.round(state.hole.r/7*10)/10;
+  if(state.mode==='timed'){
+    const s=Math.max(0,Math.ceil(state.timeLeft));
+    $('timeVal').textContent=Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
+    $('timeBox').classList.remove('hidden'); $('timeVal').classList.toggle('low', s<=15);
+  } else $('timeBox').classList.add('hidden');
+}
+let toastTimer=0;
+function bigToast(txt){
+  const el=$('toast'); el.textContent=txt; el.style.transition='none'; el.style.opacity='1'; el.style.transform='translateX(-50%) translateY(0)';
+  clearTimeout(toastTimer);
+  requestAnimationFrame(()=>{ el.style.transition='all .8s ease'; el.style.opacity='0'; el.style.transform='translateX(-50%) translateY(-18px)'; });
+}
+function showLevelTitle(name){
+  const el=$('levelTitle'); el.textContent=name; el.style.transition='none'; el.style.opacity='1';
+  requestAnimationFrame(()=>{ el.style.transition='opacity 1.4s ease 0.6s'; el.style.opacity='0'; });
+}
+
+// ---------- THREE SETUP ----------
+function initThree(){
+  const canvas=$('game');
+  renderer=new T.WebGLRenderer({canvas, antialias:true, powerPreference:'high-performance'});
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio||1, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  scene=new T.Scene();
+  camera=new T.PerspectiveCamera(55, window.innerWidth/window.innerHeight, 0.5, 4000);
+  scene.add(new T.AmbientLight(0xffffff, 0.72));
+  dirLight=new T.DirectionalLight(0xffffff, 0.85); dirLight.position.set(0.5,1,0.35); scene.add(dirLight);
+  scene.add(new T.HemisphereLight(0xffffff, 0x223044, 0.25));
+  boxGeo=new T.BoxBufferGeometry(1,1,1);
+
+  // hole disc + glowing rim (flat on ground)
+  holeDisc=new T.Mesh(new T.CircleGeometry(1,56), new T.MeshBasicMaterial({color:0x05060c}));
+  holeDisc.rotation.x=-Math.PI/2; holeDisc.position.y=0.06; holeDisc.renderOrder=2; scene.add(holeDisc);
+  const ringGeo=new T.RingGeometry(0.86,1.06,56);
+  holeRing=new T.Mesh(ringGeo, new T.MeshBasicMaterial({color:0x8aa0ff, transparent:true, opacity:0.9, side:T.DoubleSide}));
+  holeRing.rotation.x=-Math.PI/2; holeRing.position.y=0.08; holeRing.renderOrder=3; scene.add(holeRing);
+}
+function onResize(){
+  if(!renderer) return;
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  camera.aspect=window.innerWidth/window.innerHeight; camera.updateProjectionMatrix();
+}
+
+// ---------- SCENE FLOW ----------
+function startGame(theme){
+  state.mode=state._chosenMode||'zen';
+  buildLevel(theme);
+  state.scene='play'; state.running=true; state.lastTs=performance.now();
+  hideAll(); $('hud').classList.remove('hidden');
+  showLevelTitle(theme.name);
+  onResize();
+  cancelAnimationFrame(state.raf); state.raf=requestAnimationFrame(frame);
+}
+function endGame(){
+  state.running=false; cancelAnimationFrame(state.raf); state.scene='results';
+  const isBest=state.score>store.best; if(isBest){ store.best=state.score; store.save(); }
+  $('resTitle').textContent=pickPraise();
+  $('resLevel').textContent=state.theme.name+(state.mode==='timed'?' · Timed':' · Zen');
+  $('resScore').textContent=state.score;
+  $('resSize').textContent=Math.round(state.hole.r/7*10)/10+'×';
+  $('resEaten').textContent=state.eaten;
+  $('resBest').textContent=isBest?'🏆 New best score!':'Best: '+store.best;
+  $('bestScore').textContent=store.best;
+  hideAll(); $('results').classList.remove('hidden'); $('results').classList.add('fade-in');
+}
+function pickPraise(){ const p=['Nice run!','Cosmic.','Devoured!','So satisfying.','The void is pleased.','Whole lotta hole.','Time well killed.']; return p[Math.floor(Math.random()*p.length)]; }
+function hideAll(){ ['menu','picker','pause','results','hud'].forEach(id=>$(id).classList.add('hidden')); }
+function toMenu(){ state.running=false; cancelAnimationFrame(state.raf); state.scene='menu'; hideAll(); $('menu').classList.remove('hidden'); $('bestScore').textContent=store.best; }
+function randomTheme(){ return THEMES[Math.floor(Math.random()*THEMES.length)]; }
+
+function buildPicker(){
+  const grid=$('levelGrid'); grid.innerHTML='';
+  for(const th of THEMES){
+    const div=document.createElement('div'); div.className='lvl';
+    div.innerHTML=`<div class="emo">${th.emo}</div><div class="nm">${th.name}</div>`;
+    div.addEventListener('click',()=>startGame(th)); grid.appendChild(div);
+  }
+}
+
+// ---------- WIRING ----------
+function wire(){
+  const canvas=$('game');
+  canvas.addEventListener('touchstart',onDown,{passive:false});
+  canvas.addEventListener('touchmove',onMove,{passive:false});
+  canvas.addEventListener('touchend',onUp); canvas.addEventListener('touchcancel',onUp);
+  canvas.addEventListener('mousedown',onDown); window.addEventListener('mousemove',onMove); window.addEventListener('mouseup',onUp);
+  window.addEventListener('resize',onResize);
+
+  document.querySelectorAll('.chip[data-mode]').forEach(chip=>chip.addEventListener('click',()=>{
+    document.querySelectorAll('.chip[data-mode]').forEach(c=>c.classList.remove('on'));
+    chip.classList.add('on'); state._chosenMode=chip.dataset.mode;
+  }));
+  state._chosenMode='zen';
+
+  $('playRandom').addEventListener('click',()=>startGame(randomTheme()));
+  $('pickLevel').addEventListener('click',()=>{ buildPicker(); hideAll(); $('picker').classList.remove('hidden'); });
+  $('backToMenu').addEventListener('click',toMenu);
+  $('pauseBtn').addEventListener('click',()=>{ if(state.scene!=='play')return; state.running=false; cancelAnimationFrame(state.raf); state.scene='pause'; $('pause').classList.remove('hidden'); });
+  $('resumeBtn').addEventListener('click',()=>{ $('pause').classList.add('hidden'); state.scene='play'; state.running=true; state.lastTs=performance.now(); state.raf=requestAnimationFrame(frame); });
+  $('restartBtn').addEventListener('click',()=>{ $('pause').classList.add('hidden'); startGame(state.theme); });
+  $('quitBtn').addEventListener('click',toMenu);
+  $('againBtn').addEventListener('click',()=>startGame(state.theme));
+  $('nextBtn').addEventListener('click',()=>startGame(randomTheme()));
+  $('menuBtn').addEventListener('click',toMenu);
+
+  document.addEventListener('visibilitychange',()=>{
+    if(document.hidden){ if(state.scene==='play'){ state.running=false; cancelAnimationFrame(state.raf); state._wasPlaying=true; } }
+    else if(state._wasPlaying && state.scene==='play'){ state._wasPlaying=false; state.running=true; state.lastTs=performance.now(); state.raf=requestAnimationFrame(frame); }
+  });
+
+  $('bestScore').textContent=store.best;
+}
+
+// boot
+initThree();
+wire();
+
+})();
